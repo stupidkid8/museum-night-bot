@@ -12,7 +12,7 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 # =========================
 # CONFIG
 # =========================
-BOT_TOKEN = os.getenv("8441700443:AAEuMOkI5zeIC015y8hxng4i5rLqWAPWbKU")
+BOT_TOKEN = BOT_TOKEN = 8441700443:AAEuMOkI5zeIC015y8hxng4i5rLqWAPWbKU 
 
 # Куда слать отзывы админу (если не нужно — оставь None)
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # например "123456789"
