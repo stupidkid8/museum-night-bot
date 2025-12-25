@@ -3,9 +3,13 @@ import logging
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, FSInputFile
+from aiogram.types import (
+    ReplyKeyboardMarkup, KeyboardButton, FSInputFile,
+    InlineKeyboardMarkup, InlineKeyboardButton
+)
 
 API_TOKEN = "8441700443:AAEuMOkI5zeIC015y8hxng4i5rLqWAPWbKU"
+FEEDBACK_FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLScoJVHvACWSvIYTplt0dEAey1wGLFb15hcl4lh6pYmyE-ONFw/viewform?usp=dialog"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -23,6 +27,7 @@ kb_main = ReplyKeyboardMarkup(
         [KeyboardButton(text="Расскажи про все мероприятия."),
          KeyboardButton(text="Хочу посмотреть фильтры.")],
         [KeyboardButton(text="Составь мое расписание")],
+        [KeyboardButton(text="Отзывы")],
     ],
     resize_keyboard=True
 )
@@ -279,7 +284,15 @@ async def all_events(message: types.Message):
 @dp.message(lambda m: m.text == "Хочу посмотреть фильтры.")
 async def filters(message: types.Message):
     await message.answer("Здесь будут фильтры по времени, месту и т.д.")
-
+@dp.message(lambda m: m.text == "Отзывы")
+async def feedback(message: types.Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Оставить отзыв (форма)", url=FEEDBACK_FORM_URL)
+    ]])
+    await message.answer(
+        "Оставь отзыв по форме (1–2 минуты).",
+        reply_markup=kb
+    )
 
 async def main():
     await dp.start_polling(bot)
