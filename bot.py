@@ -1,29 +1,36 @@
 import asyncio
+import logging
 import os
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import (
+    ReplyKeyboardMarkup, KeyboardButton, FSInputFile,
+    InlineKeyboardMarkup, InlineKeyboardButton
+)
 
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+EVENTS_TYUMEN_LINK = os.getenv("EVENTS_TYUMEN_LINK", "https://afisha.yandex.ru/tyumen")
+FEEDBACK_LINK = os.getenv(
+    "FEEDBACK_LINK",
+    "https://docs.google.com/forms/d/e/1FAIpQLScoJVHvACWSvIYTplt0dEAey1wGLFb15hcl4lh6pYmyE-ONFw/viewform?usp=dialog",
+)
+
+logging.basicConfig(level=logging.INFO)
+
+if not BOT_TOKEN:
+    raise RuntimeError("Укажи BOT_TOKEN в окружении: export BOT_TOKEN='...'")
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+
+# user_id -> данные опроса
+answers: dict[int, dict] = {}
 
 # =========================
-# CONFIG
-# =========================
-BOT_TOKEN =  8441700443:AAEuMOkI5zeIC015y8hxng4i5rLqWAPWbKU 
-
-# Куда слать отзывы админу (если не нужно — оставь None)
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # например "123456789"
-ADMIN_CHAT_ID = int(ADMIN_CHAT_ID) if ADMIN_CHAT_ID and ADMIN_CHAT_ID.isdigit() else None
-
-# Ссылка/контакт для отзывов (Google Form / сайт / etc.)
-FEEDBACK_LINK = os.getenv("FEEDBACK_LINK", "https://example.com/feedback")
-
-
-# =========================
-# DATA: EVENTS (15 шт)
+# EVENTS (для фильтров)
 # =========================
 EVENTS = {
     "🎄 Открытие главной городской ёлки (27 декабря)": {
@@ -133,11 +140,8 @@ EVENTS = {
     },
 }
 
-EVENT_TITLES = list(EVENTS.keys())
-
-
 # =========================
-# HELPERS: FILTERS
+# FILTER HELPERS
 # =========================
 def normalize_price_to_int(price_str: str) -> int | None:
     digits = "".join(ch for ch in price_str if ch.isdigit())
@@ -152,6 +156,8 @@ def event_date_key(time_str: str) -> str:
         return "24.12.2025"
     if "25–30 декабря 2025" in t or "25-30 декабря 2025" in t:
         return "25-30.12.2025"
+    if "27 декабря 2025" in t or "26 декабря 2025" in t:
+        return "27.12.2025"
     if "28 декабря 2025" in t:
         return "28.12.2025"
     if "2 января 2026" in t:
@@ -162,10 +168,6 @@ def event_date_key(time_str: str) -> str:
         return "04.01.2026"
     if "6 января 2026" in t:
         return "06.01.2026"
-    if "27 декабря 2025" in t:
-        return "27.12.2025"
-    if "26 декабря 2025" in t:
-        return "27.12.2025"
     return "другое"
 
 
@@ -184,36 +186,34 @@ def event_format_tag(format_str: str) -> str:
     return "прочее"
 
 
-def filter_events(date_choice: str, price_choice: str, fmt_choice: str) -> list[str]:
+def filter_events(date_choice: str, price_choice: str, fmt_choice: str) -> list[dict]:
     out = []
-    for key, e in EVENTS.items():
+    for e in EVENTS.values():
         d = event_date_key(e["time"])
         p = normalize_price_to_int(e["price"])
         is_free = (p == 0)
-
         tag = event_format_tag(e["format"])
 
         if date_choice != "Любая дата" and date_choice != d:
             continue
-
         if price_choice == "Только бесплатно" and not is_free:
             continue
         if price_choice == "Только платно" and is_free:
             continue
-
         if fmt_choice != "Любой формат" and fmt_choice != tag:
             continue
 
-        out.append(key)
-
+        out.append(e)
     return out
 
 
-def kb_from_event_keys(keys: list[str]) -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=k)] for k in keys] + [[KeyboardButton(text="🔙 В меню")]],
-        resize_keyboard=True,
-    )
+# =========================
+# FSM STATES
+# =========================
+class FilterForm(StatesGroup):
+    date = State()
+    price = State()
+    fmt = State()
 
 
 # =========================
@@ -222,22 +222,72 @@ def kb_from_event_keys(keys: list[str]) -> ReplyKeyboardMarkup:
 kb_main = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Что такое ночь музеев?")],
-        [KeyboardButton(text="Все мероприятия")],
-        [KeyboardButton(text="Хочу посмотреть фильтры.")],
+        [
+            KeyboardButton(text="Расскажи про все мероприятия."),
+            KeyboardButton(text="Хочу посмотреть фильтры."),
+        ],
         [KeyboardButton(text="Составь мое расписание")],
-        [KeyboardButton(text="Оставить отзыв")],
+        [KeyboardButton(text="События в Тюмени")],
+        [KeyboardButton(text="Отзывы (ссылка)")],
     ],
     resize_keyboard=True,
 )
 
-kb_all_events = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text=title)] for title in EVENT_TITLES]
-    + [[KeyboardButton(text="🔙 В меню")]],
+kb_about = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="🔙 Назад")]],
     resize_keyboard=True,
 )
 
 kb_back_to_menu = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text="🔙 В меню")]],
+    resize_keyboard=True,
+)
+
+kb_company = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="Иду один")],
+        [KeyboardButton(text="Один, я интроверт")],
+        [KeyboardButton(text="Иду в компании (взрослые)")],
+        [KeyboardButton(text="Иду в компании (школьники)")],
+        [KeyboardButton(text="Иду с маленьким ребёнком")],
+        [KeyboardButton(text="Идём с парой")],
+        [KeyboardButton(text="🔙 В меню")],
+    ],
+    resize_keyboard=True,
+)
+
+kb_age = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="Взрослые 30+")],
+        [KeyboardButton(text="Студенты 18+")],
+        [KeyboardButton(text="Школьники 13–17")],
+        [KeyboardButton(text="Микс-компания")],
+        [KeyboardButton(text="Микс-компания с ребёнком")],
+        [KeyboardButton(text="🔙 В меню")],
+    ],
+    resize_keyboard=True,
+)
+
+kb_activity = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="Экскурсии"), KeyboardButton(text="Квесты")],
+        [KeyboardButton(text="Интеллектуальные лекции")],
+        [KeyboardButton(text="Мастер-классы")],
+        [KeyboardButton(text="Смотреть кино")],
+        [KeyboardButton(text="Изучать технологии")],
+        [KeyboardButton(text="🔙 В меню")],
+    ],
+    resize_keyboard=True,
+)
+
+kb_plan_actions = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="Концерт в Конторе")],
+        [KeyboardButton(text="Квест в Словцова")],
+        [KeyboardButton(text="Выставка в Колокольникова")],
+        [KeyboardButton(text="Далее")],
+        [KeyboardButton(text="🔙 В меню")],
+    ],
     resize_keyboard=True,
 )
 
@@ -274,99 +324,218 @@ kb_filters_format = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
+kb_events_tyumen = InlineKeyboardMarkup(
+    inline_keyboard=[[InlineKeyboardButton(text="Открыть афишу Тюмени", url=EVENTS_TYUMEN_LINK)]]
+)
+
+kb_feedback_link = InlineKeyboardMarkup(
+    inline_keyboard=[[InlineKeyboardButton(text="Оставить отзыв", url=FEEDBACK_LINK)]]
+)
 
 # =========================
-# FSM
+# OPTIONS
 # =========================
-class FeedbackForm(StatesGroup):
-    waiting_text = State()
+COMPANY_OPTIONS = [
+    "Иду один",
+    "Один, я интроверт",
+    "Иду в компании (взрослые)",
+    "Иду в компании (школьники)",
+    "Иду с маленьким ребёнком",
+    "Идём с парой",
+]
 
+AGE_OPTIONS = [
+    "Взрослые 30+",
+    "Студенты 18+",
+    "Школьники 13–17",
+    "Микс-компания",
+    "Микс-компания с ребёнком",
+]
 
-class FilterForm(StatesGroup):
-    date = State()
-    price = State()
-    fmt = State()
-
+ACTIVITY_OPTIONS = [
+    "Экскурсии",
+    "Квесты",
+    "Интеллектуальные лекции",
+    "Мастер-классы",
+    "Смотреть кино",
+    "Изучать технологии",
+]
 
 # =========================
 # HANDLERS
 # =========================
+@dp.message(CommandStart())
 async def cmd_start(message: types.Message):
-    await message.answer("Привет! Выбирай пункт в меню.", reply_markup=kb_main)
+    text = (
+        "Привет, я бот мероприятия Ночь музеев!\n"
+        "Встречаемся 13.06 | СБ\n"
+        "Расскажи, как я могу помочь?"
+    )
+    await message.answer(text, reply_markup=kb_main)
 
 
-async def back_to_menu(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Главное меню.", reply_markup=kb_main)
-
-
+@dp.message(lambda m: m.text == "Что такое ночь музеев?")
 async def about(message: types.Message):
     await message.answer(
-        "«Ночь музеев» — городская культурная акция: площадки делают спецпрограмму "
-        "(экскурсии, квесты, концерты, шоу).",
-        reply_markup=kb_main,
+        "«Ночь музеев» — это международная ежегодная культурная акция, когда музеи, галереи "
+        "и другие культурные учреждения работают в вечерние и ночные часы и делают спецпрограмму: "
+        "экскурсии, концерты, мастер‑классы и т.д.\n\n"
+        "Хочешь — в главном меню можно составить персональное расписание.",
+        reply_markup=kb_about,
     )
 
 
-async def all_events(message: types.Message):
-    await message.answer("Выбери мероприятие — покажу подробности:", reply_markup=kb_all_events)
+@dp.message(lambda m: m.text == "🔙 Назад")
+async def back_from_about(message: types.Message):
+    await message.answer("Ок, возвращаемся в главное меню. Чем могу помочь?", reply_markup=kb_main)
 
 
-async def show_event_details(message: types.Message):
-    e = EVENTS.get(message.text)
-    if not e:
+@dp.message(lambda m: m.text == "🔙 В меню")
+async def back_to_menu(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Ок, возвращаемся в главное меню.", reply_markup=kb_main)
+
+
+# ---- LINKS ----
+@dp.message(lambda m: m.text == "События в Тюмени")
+async def tyumen_events_link(message: types.Message):
+    await message.answer(
+        "Вот актуальная афиша событий в Тюмени (откроется в браузере):",
+        reply_markup=kb_events_tyumen,
+    )
+
+
+@dp.message(lambda m: m.text == "Отзывы (ссылка)")
+async def feedback_link(message: types.Message):
+    await message.answer("Оставить отзыв можно по ссылке:", reply_markup=kb_feedback_link)
+
+
+# ---- QUIZ (расписание) ----
+@dp.message(lambda m: m.text == "Составь мое расписание")
+async def start_quiz(message: types.Message):
+    user_id = message.from_user.id
+    answers[user_id] = {"company": None, "age": None, "activities": []}
+    await message.answer("Хорошо, давай подберём тебе маршрут. В какой компании ты идёшь?", reply_markup=kb_company)
+
+
+@dp.message(lambda m: m.text in COMPANY_OPTIONS)
+async def ask_age(message: types.Message):
+    user_id = message.from_user.id
+    answers.setdefault(user_id, {"company": None, "age": None, "activities": []})
+    answers[user_id]["company"] = message.text
+    await message.answer("Сколько лет тебе (и тем, кто пойдёт с тобой, если вы идёте вместе)?", reply_markup=kb_age)
+
+
+@dp.message(lambda m: m.text in AGE_OPTIONS)
+async def ask_activity(message: types.Message):
+    user_id = message.from_user.id
+    answers.setdefault(user_id, {"company": None, "age": None, "activities": []})
+    answers[user_id]["age"] = message.text
+    await message.answer(
+        "Что ты хочешь делать в Ночь музеев? (можно выбрать несколько пунктов по очереди).\n"
+        "Когда закончишь выбор, напиши 'Готово'.",
+        reply_markup=kb_activity,
+    )
+
+
+@dp.message(lambda m: m.text in ACTIVITY_OPTIONS)
+async def collect_activities(message: types.Message):
+    user_id = message.from_user.id
+    answers.setdefault(user_id, {"company": None, "age": None, "activities": []})
+    if message.text not in answers[user_id]["activities"]:
+        answers[user_id]["activities"].append(message.text)
+    await message.answer(f"Ок, добавляю: {message.text}. Можешь выбрать ещё или написать 'Готово'.")
+
+
+@dp.message(lambda m: (m.text or "").strip().lower() == "готово")
+async def finish_quiz(message: types.Message):
+    user_id = message.from_user.id
+    data = answers.get(user_id)
+
+    if not data:
+        await message.answer("Пока нет данных. Нажми «Составь мое расписание» и пройди мини-опрос.", reply_markup=kb_main)
         return
 
-    text = (
-        f"<b>{e['title']}</b>\n"
-        f"Время: {e['time']}\n"
-        f"Адрес: {e['address']}\n"
-        f"Формат: {e['format']}\n"
-        f"Цена: {e['price']}"
-    )
-
-    kb_event_nav = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="Все мероприятия")],
-            [KeyboardButton(text="Хочу посмотреть фильтры.")],
-            [KeyboardButton(text="🔙 В меню")],
-        ],
-        resize_keyboard=True,
-    )
-
-    await message.answer(text, parse_mode="HTML", reply_markup=kb_event_nav)
-
-
-async def build_schedule(message: types.Message):
-    picks = [
-        "🎄 Открытие главной городской ёлки (27 декабря)",
-        "🎅 Резиденция Деда Мороза (Кристалл)",
-        "🎻 Concord Orchestra — Штраус (23 декабря)",
-    ]
-    lines = []
-    for k in picks:
-        e = EVENTS.get(k)
-        if e:
-            lines.append(f"• {e['title']} — {e['time']} — {e['address']}")
+    company = data.get("company") or "не указано"
+    age = data.get("age") or "не указано"
+    activities = data.get("activities") or ["не выбрано"]
+    activities_text = ", ".join(activities)
 
     await message.answer(
-        "Персональное предложение (черновик):\n\n"
-        + "\n".join(lines)
-        + "\n\nХочешь точнее — напиши: дата, бюджет, с кем идёшь (один/пара/дети), что не любишь.",
+        "Супер, вот что я про тебя понял:\n"
+        f"• Компания: {company}\n"
+        f"• Возраст/тип компании: {age}\n"
+        f"• Любимые активности: {activities_text}\n",
         reply_markup=kb_main,
     )
+
+    schedule_text = (
+        "Лови своё расписание на Ночь музеев:\n\n"
+        "20:00–20:30 — Контора Пароходства (ул. 25 лет Октября 23): концерт группы Биофакс.\n"
+        "Далее: 12 минут пешком (≈5 минут на самокате).\n\n"
+        "20:45–21:15 — музей им. Словцова (ул. Советская 63): квест по современному искусству.\n"
+        "Далее: 15 минут пешком (≈7 минут на самокате).\n\n"
+        "21:35–22:30 — музей им. Колокольникова (ул. Республики 56): выставка.\n\n"
+        "Точки маршрута отмечены на карте ниже."
+    )
+
+    await message.answer(schedule_text, reply_markup=kb_plan_actions)
+
+    # если файлов нет на сервере — можно удалить эти 2 строки
+    if os.path.exists("map.jpg"):
+        await message.answer_photo(FSInputFile("map.jpg"))
+
+
+@dp.message(lambda m: m.text == "Концерт в Конторе")
+async def action_kontora(message: types.Message):
+    await message.answer("Концерт в Конторе Пароходства: приходи чуть раньше, чтобы занять места.")
+
+
+@dp.message(lambda m: m.text == "Квест в Словцова")
+async def action_slovtsov(message: types.Message):
+    await message.answer("Квест в музее им. Словцова: будь на месте за 10 минут, чтобы зарегистрироваться.")
+
+
+@dp.message(lambda m: m.text == "Выставка в Колокольникова")
+async def action_kolok(message: types.Message):
+    await message.answer("Выставка в музее им. Колокольникова: можно приходить в любое время в указанном интервале.")
+
+
+@dp.message(lambda m: m.text == "Далее")
+async def after_route(message: types.Message):
+    await message.answer(
+        "Если захочешь сделать паузу после маршрута, на этой карте отмечены дополнительные точки рядом.\n\n"
+        "Подробнее о точке на карте: https://go.2gis.com/4WwnM"
+    )
+    if os.path.exists("map_cafe.jpg"):
+        await message.answer_photo(FSInputFile("map_cafe.jpg"))
+
+
+# ---- ALL EVENTS (старый текст) ----
+@dp.message(lambda m: m.text == "Расскажи про все мероприятия.")
+async def all_events(message: types.Message):
+    text = (
+        "Кратко про события в Тюмени в декабре:\n\n"
+        "• Концерты и шоу – новогодние программы.\n"
+        "• Театр – детские и взрослые спектакли.\n"
+        "• Выставки и ярмарки – городские площадки.\n\n"
+        "Подробности смотри на афишных сайтах города."
+    )
+    await message.answer(text)
 
 
 # ---- FILTERS FSM ----
+@dp.message(lambda m: m.text == "Хочу посмотреть фильтры.")
 async def filters_start(message: types.Message, state: FSMContext):
     await state.set_state(FilterForm.date)
     await message.answer("Выбери дату:", reply_markup=kb_filters_date)
 
 
+@dp.message(FilterForm.date)
 async def filters_date(message: types.Message, state: FSMContext):
     if message.text == "🔙 В меню":
         await state.clear()
-        await message.answer("Главное меню.", reply_markup=kb_main)
+        await message.answer("Ок, главное меню.", reply_markup=kb_main)
         return
 
     await state.update_data(date=message.text)
@@ -374,10 +543,11 @@ async def filters_date(message: types.Message, state: FSMContext):
     await message.answer("Цена:", reply_markup=kb_filters_price)
 
 
+@dp.message(FilterForm.price)
 async def filters_price(message: types.Message, state: FSMContext):
     if message.text == "🔙 В меню":
         await state.clear()
-        await message.answer("Главное меню.", reply_markup=kb_main)
+        await message.answer("Ок, главное меню.", reply_markup=kb_main)
         return
 
     await state.update_data(price=message.text)
@@ -385,10 +555,11 @@ async def filters_price(message: types.Message, state: FSMContext):
     await message.answer("Формат:", reply_markup=kb_filters_format)
 
 
+@dp.message(FilterForm.fmt)
 async def filters_format(message: types.Message, state: FSMContext):
     if message.text == "🔙 В меню":
         await state.clear()
-        await message.answer("Главное меню.", reply_markup=kb_main)
+        await message.answer("Ок, главное меню.", reply_markup=kb_main)
         return
 
     await state.update_data(fmt=message.text)
@@ -399,83 +570,25 @@ async def filters_format(message: types.Message, state: FSMContext):
     price_choice = data.get("price", "Любая цена")
     fmt_choice = data.get("fmt", "Любой формат")
 
-    keys = filter_events(date_choice, price_choice, fmt_choice)
+    found = filter_events(date_choice, price_choice, fmt_choice)
 
-    if not keys:
-        await message.answer(
-            "По этим фильтрам ничего не нашлось. Попробуй другие значения.",
-            reply_markup=kb_main,
+    if not found:
+        await message.answer("По этим фильтрам ничего не нашлось.", reply_markup=kb_main)
+        return
+
+    lines = []
+    for e in found[:10]:
+        lines.append(
+            f"• {e['title']}\n"
+            f"  Время: {e['time']}\n"
+            f"  Адрес: {e['address']}\n"
+            f"  Цена: {e['price']}"
         )
-        return
 
-    await message.answer(
-        f"Нашлось: {len(keys)}. Выбирай мероприятие:",
-        reply_markup=kb_from_event_keys(keys),
-    )
+    await message.answer("Нашла варианты:\n\n" + "\n\n".join(lines), reply_markup=kb_main)
 
 
-# ---- FEEDBACK FSM ----
-async def feedback_start(message: types.Message, state: FSMContext):
-    await state.set_state(FeedbackForm.waiting_text)
-    await message.answer(
-        "Напиши отзыв одним сообщением.\n"
-        f"Если удобнее — можно по ссылке: {FEEDBACK_LINK}",
-        reply_markup=kb_back_to_menu,
-    )
-
-
-async def feedback_receive(message: types.Message, state: FSMContext):
-    text = (message.text or "").strip()
-    if not text:
-        await message.answer("Отзыв пустой. Напиши текстом, пожалуйста.", reply_markup=kb_back_to_menu)
-        return
-
-    user = message.from_user
-    meta = f"Отзыв от: {user.full_name} (@{user.username}) id={user.id}" if user else "Отзыв"
-
-    if ADMIN_CHAT_ID:
-        try:
-            await message.bot.send_message(ADMIN_CHAT_ID, f"{meta}\n\n{text}")
-        except Exception:
-            pass
-
-    await state.clear()
-    await message.answer("Принято. Спасибо!", reply_markup=kb_main)
-
-
-async def fallback(message: types.Message):
-    await message.answer("Не понял. Нажми кнопку в меню.", reply_markup=kb_main)
-
-
-# =========================
-# MAIN
-# =========================
 async def main():
-    if not BOT_TOKEN or BOT_TOKEN == "PASTE_TOKEN_HERE":
-        raise RuntimeError("Укажи BOT_TOKEN (env BOT_TOKEN или строкой в коде).")
-
-    bot = Bot(token=BOT_TOKEN)
-    dp = Dispatcher(storage=MemoryStorage())
-
-    dp.message.register(cmd_start, CommandStart())
-    dp.message.register(lambda m, state: back_to_menu(m, state), lambda m: m.text == "🔙 В меню")
-
-    dp.message.register(about, lambda m: m.text == "Что такое ночь музеев?")
-    dp.message.register(all_events, lambda m: m.text == "Все мероприятия")
-    dp.message.register(filters_start, lambda m: m.text == "Хочу посмотреть фильтры.")
-    dp.message.register(build_schedule, lambda m: m.text == "Составь мое расписание")
-
-    dp.message.register(feedback_start, lambda m: m.text == "Оставить отзыв")
-    dp.message.register(feedback_receive, FeedbackForm.waiting_text)
-
-    dp.message.register(show_event_details, lambda m: m.text in EVENT_TITLES)
-
-    dp.message.register(filters_date, FilterForm.date)
-    dp.message.register(filters_price, FilterForm.price)
-    dp.message.register(filters_format, FilterForm.fmt)
-
-    dp.message.register(fallback)
-
     await dp.start_polling(bot)
 
 
