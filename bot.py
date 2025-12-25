@@ -10,7 +10,7 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton
 )
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("8441700443:AAEuMOkI5zeIC015y8hxng4i5rLqWAPWbKU")
 
 EVENTS_TYUMEN_LINK = os.getenv("EVENTS_TYUMEN_LINK", "https://afisha.yandex.ru/tyumen")
 FEEDBACK_LINK = os.getenv(
